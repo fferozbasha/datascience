@@ -36,7 +36,7 @@ class KerasNeuralFinder:
     _input_output_layer_activations = 'output_layer_activations'
     _input_optimizers = 'optimizers'
     _input_epochs = 'epochs'
-    _input_learning_rates = 'learning_rates'
+    _input_learning_rates = 'learning_rate'
     _input_loss_functions = 'loss_functions'
     _input_kernel_inializers = 'kernel_inializers'
     _input_bias_initializers = 'bias_initializers'
@@ -148,7 +148,7 @@ class KerasNeuralFinder:
         model.compile(loss=loss, optimizer=optimizer_instance, metrics=['accuracy'])
         return model
 
-    def _fit_model(self, model, epoch, batch_size, local_X=None, local_y=None):
+    def _fit_model(self, model, epoch, batch_size, x=None, y=None):
         """
         Fits the model with the provided X and y values
         :param model: Compiled Model that has to be fit with the dataset
@@ -158,10 +158,10 @@ class KerasNeuralFinder:
         :param local_y: Outcome varaibles
         :return: Model fit with the dataset ready to be evaluated
         """
-        model.fit(local_X, local_y, epochs=epoch, batch_size=500, verbose=0)
+        model.fit(x, y, epochs=epoch, batch_size=500, verbose=0)
         return model
 
-    def _evaluate_model(self, model, local_X, local_y):
+    def _evaluate_model(self, model, x, y):
         """
         Evalutes the model for Loss and accuracy metrics
         :param model: model that has to be evaluated
@@ -169,7 +169,7 @@ class KerasNeuralFinder:
         :param local_y: outcome variable
         :return: dict {'loss': loss, 'accuracy': acc}
         """
-        loss, acc = model.evaluate(local_X, local_y, verbose=0)
+        loss, acc = model.evaluate(x, y, verbose=0)
         return {'loss': loss, 'accuracy': acc}
 
     def _convert_list_to_string(self, input_list):
@@ -212,10 +212,8 @@ class KerasNeuralFinder:
         :return: None
         """
         file_name_prefix = 'model_hp_results_'
-        df_name = df.rename
-        if df_name:
-            file_name_prefix = df_name
-        curr_date_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        #curr_date_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        curr_date_time = ""
         filename = file_name_prefix + curr_date_time + ".csv"
         df.to_csv(filename)
         print(f"Hyper parameter testing results saved to file - {filename}")
@@ -253,9 +251,12 @@ class KerasNeuralFinder:
         return param_grid
 
     @staticmethod
-    def get_param_info():
+    def usage():
 
         print("""
+        Create a dictionary as below with the choice of options for each parameter
+        =========================================================================
+        
         param_grid = {}
         param_grid['hidden_layer_neurons'] = [[11, 8, 6], [6, 6], [6, 5, 3], [6]]
         param_grid['output_layer_neurons'] = [1]
@@ -269,14 +270,14 @@ class KerasNeuralFinder:
         param_grid['loss'] = ['categorical_crossentropy', 'sparse_categorical_crossentropy']
 
         Note:
+        ====
         hidden_layer_neurons: Ex- [[11, 8, 5], [8, 6]] means there are 2 possible options for 
         hidden layer configuration. 
         1st = 3 layers with 11,8 and 5 neurons in each layer
         2nd = 2 layers with 8 and 6 neurons in each layer
 
-        Alternate way to configure hidden_layer_neurons
-        get_layer_options(range)
-        range can be defined in a dict as {1:(8, 13), 2:(5, 13), 3:(5, 8), 4:(5,6)}
+        Alternate way to configure hidden_layer_neurons:
+        dict as {1:(8, 13), 2:(5, 13), 3:(5, 8), 4:(5,6)}
         Key = refers to the layer number
         Value = range of number of neurons that can be configured in that layer
         Ex: 
@@ -284,7 +285,17 @@ class KerasNeuralFinder:
         (8, 13) = means that the 1st layer can have from 8 to 13 neurons
         2 = refers to the 2nd layer
         (5, 13) = means that the 2nd layer can have from 5 to 13 neurons
+        
+        Execution:
+        ========
+        
+        results = knf.fit(param_grid=param_grid, store_results=True, silent_mode=True, X=X_train, y=y_train)
+        The returned results dataframe will have the list of all executions, from which you can choose the best option
         """)
+
+    @staticmethod
+    def get_best_result(df):
+        return df.sort_values(by=['loss'], ascending=True).head(10).sort_values(by='accuracy', ascending=False).head(1)
 
     def fit(self, param_grid, silent_mode=False, store_results=False, X=None, y=None):
         """
@@ -338,9 +349,6 @@ class KerasNeuralFinder:
             loss_functions = param_grid.get(self._input_loss_functions, self._default_loss)
             kernel_inializers = param_grid.get(self._input_kernel_inializers, self._default_kernel_initializers)
             bias_initializers = param_grid.get(self._input_bias_initializers, self._default_bias_initializers)
-
-            print(f"validated...")
-            print(param_grid)
 
             total_diff_choices = self.estimate_run(param_grid)
 
@@ -406,7 +414,7 @@ class KerasNeuralFinder:
                                                         model_result['Hidden Layer(# of neurons)'] = \
                                                             self._convert_list_to_string(choice_hidden_layer_neurons)
                                                         model_result['Hidden Layer(# of layers)'] = \
-                                                            len(choice_hidden_layer_activations)
+                                                            len(choice_hidden_layer_neurons)
                                                         model_result['Hidden Layer(Activation Fn)'] = \
                                                             choice_hidden_layer_activations
                                                         model_result['Output Layer(# of neurons)'] = \
@@ -418,6 +426,8 @@ class KerasNeuralFinder:
                                                         model_result[self._input_kernel_inializers] = choice_kernel_inializers
                                                         model_result[self._input_bias_initializers] = choice_bias_initializers
                                                         model_result[self._input_epochs] = choice_epochs
+                                                        model_result[self._input_loss_functions] = choice_loss_functions
+                                                        print(model_evaluation_train_result)
                                                         model_result['loss'] = model_evaluation_train_result['loss']
                                                         model_result['accuracy'] = model_evaluation_train_result['accuracy']
 
@@ -457,26 +467,3 @@ class KerasNeuralFinder:
                 self._output_df_to_csv(model_results_df)
 
             return model_results_df
-
-
-"""
-X = np.random.randn(1000).reshape(1000, 1)
-y = np.random.randn(1000).reshape(1000, 1)
-
-
-param_grid = {}
-param_grid['hidden_layer_neurons'] = {1:(1,2)}
-param_grid['output_layer_neurons'] = 1
-param_grid['hidden_layer_activation'] = ['sigmoid']
-param_grid['output_layer_activation'] = ['sigmoid']
-param_grid['kernel_inializers'] = ['glorot_normal']
-param_grid['bias_initializers'] = ['glorot_normal']
-param_grid['optimizers'] = [ 'Adam']
-param_grid['epochs'] = 1
-param_grid['learning_rate'] = [0.1]
-param_grid['loss'] = ['binary_crossentropy']
-
-knf = KerasNeuralFinder()
-results = knf.fit(param_grid=param_grid, X=X, y=y)
-print(results.T)
-"""
