@@ -9,6 +9,7 @@ import datetime
 import time
 import traceback
 from sklearn.model_selection import StratifiedKFold, cross_val_score
+import itertools
 
 
 class KerasNeuralFinder:
@@ -20,19 +21,22 @@ class KerasNeuralFinder:
 
     _confidence_interval_std = {80: 1.282, 85: 1.440, 90: 1.645, 95: 1.960, 99: 2.576, 99.5: 2.807, 99.9: 3.291}
 
+    _model_weights = []
+
     # Default value for the inputs
-    _default_hidden_layer_neurons = [[11, 6]]
-    _default_output_layer_neurons = [1]
-    _default_hidden_layer_activation = ['relu']
-    _default_output_layer_activation = ['relu']
-    _default_optimizers = ['Adam']
-    _default_epochs = ['10']
-    _default_learning_rate = [0.01]
-    _default_loss = ['binary_crossentropy']
-    _default_kernel_initializers = ['glorot_normal']
-    _default_bias_initializers = ['random_normal']
+    _default_hidden_layer_neurons = [11, 6]
+    _default_output_layer_neurons = 1
+    _default_hidden_layer_activation = 'relu'
+    _default_output_layer_activation = 'relu'
+    _default_optimizers = 'Adam'
+    _default_epochs = '10'
+    _default_learning_rate = 0.01
+    _default_loss = 'binary_crossentropy'
+    _default_kernel_initializers = 'glorot_normal'
+    _default_bias_initializers = 'random_normal'
 
     # Input name to be used by the users, while providig param_grid
+    _choice = 'choice'
     _input_hidden_layer_neurons = 'hidden_layer_neurons'
     _input_output_layer_neurons = 'output_layer_neurons'
     _input_hidden_layer_activations = 'hidden_layer_activations'
@@ -70,12 +74,13 @@ class KerasNeuralFinder:
         """
         number_of_hidden_layers = len(hidden_layer_neurons)
         i = 0
+
         for layer in range(0, number_of_hidden_layers):
-            model.add(Dense(hidden_layer_neurons[i], input_shape=(X.shape[1],),
+            model.add(Dense(hidden_layer_neurons[i], input_shape=(X.shape[1], ),
                             activation=activation_fn_hidden_layer, kernel_initializer=kernel_inializers,
-                            bias_initializer=bias_initializers))
+                            bias_initializer=bias_initializers, name='hidden_layer_' + str(i)))
             i += 1
-        model.add(Dense(output_layer_neurons, input_shape=(X.shape[1],), activation=activation_fn_output_layer))
+        model.add(Dense(output_layer_neurons, input_shape=(X.shape[1],), activation=activation_fn_output_layer, name='output_layer'))
 
         return model
 
@@ -147,7 +152,7 @@ class KerasNeuralFinder:
         #training_loss_score = []
         #validation_loss_score = []
         results = []
-        skf = StratifiedKFold(n_splits=fold, shuffle=True)
+        skf = StratifiedKFold(n_splits=fold, shuffle=False)
 
         for train_indices, val_indices in skf.split(x, y):
             iter_result = {}
@@ -177,6 +182,64 @@ class KerasNeuralFinder:
         :return: compiled model ready to be fit with dataset
         """
         model.compile(loss=loss, optimizer=optimizer_instance, metrics=metrics)
+        return model
+
+    def _retain_weights(self, model, model_info):
+        """
+        To retain the weights for re-run use to ensure reproducible results
+        :param model: model which will be iterated for layers and corresponding weights will be retained
+        :return: returns the dictionary of weights for each layer (layer name as key)
+        """
+        for layer in model.layers:
+            weights = layer.get_weights()
+            model_info[layer.name] = weights
+        self._model_weights.append(model_info)
+
+    def _set_weights(self, model, prev_weights, model_info, choice):
+
+        if prev_weights.empty:
+            print("Invalid file provided for the historical weights.")
+            return
+
+        layer_info = {self._choice: model_info[self._choice],
+                      self._input_hidden_layer_neurons: model_info[self._input_hidden_layer_neurons],
+                      self._input_hidden_layer_activations: model_info[self._input_hidden_layer_activations],
+                      self._input_output_layer_activations: model_info[self._input_output_layer_activations],
+                      self._input_optimizers: model_info[self._input_optimizers],
+                      self._input_learning_rates: model_info[self._input_learning_rates],
+                      self._input_kernel_inializers: model_info[self._input_kernel_inializers],
+                      self._input_bias_initializers: model_info[self._input_bias_initializers],
+                      self._input_epochs: model_info[self._input_epochs],
+                      self._input_loss_functions: model_info[self._input_loss_functions]}
+
+        filtered = pd.DataFrame()
+        idx = 0
+        if not prev_weights.empty:
+            for keys in layer_info.keys():
+                value = layer_info[keys]
+                if keys in prev_weights.columns:
+                    if idx == 0:
+                        filtered = prev_weights[prev_weights[keys] == value]
+                    elif filtered.empty:
+                        print(f"No previous weights found for {choice}")
+                        return model
+                    else:
+                        filtered = filtered[filtered[keys] == value]
+                idx += 1
+
+        if not filtered.empty:
+            for layer in model.layers:
+                earlier_layer_weights = filtered.get(layer.name, None)
+                if not earlier_layer_weights.empty:
+                    wts = np.asarray(earlier_layer_weights[choice-1])
+                    _all_weights_list = []
+                    for wt in wts:
+                        _individual_wts_array = np.array(wt)
+                        _all_weights_list.append(_individual_wts_array)
+                    layer.set_weights(_all_weights_list)
+
+            return model
+
         return model
 
     def _fit_model(self, model, epoch, batch_size, x, y, xval, yval):
@@ -236,18 +299,29 @@ class KerasNeuralFinder:
 
         return final_list
 
-    def _output_df_to_csv(self, df=None):
+    def _output_df_to_csv(self, df=None, name_prefix="results", suffix=True):
         """
         Outputs the dataframe in to a csv file
         :param df: DataFrame to be stored in a csv file
         :return: None
         """
-        file_name_prefix = 'model_hp_results_'
-        # curr_date_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
-        curr_date_time = ""
-        filename = file_name_prefix + curr_date_time + ".csv"
+        curr_date_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        if suffix:
+           filename = name_prefix + "_" + curr_date_time + ".csv"
+        else:
+            filename = name_prefix + ".csv"
         df.to_csv(filename)
         print(f"Hyper parameter testing results saved to file - {filename}")
+
+    def _output_df_to_json(self, df, name_prefix="weights", suffix=True):
+        curr_date_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        if suffix:
+            filename = name_prefix + "_" + curr_date_time + ".json"
+        else:
+            filename = name_prefix + ".json"
+        file = open(filename, 'w+')
+        df.to_json(file)
+        print(f"Weights stored in file {filename}")
 
     @staticmethod
     def estimate_run(param_grid):
@@ -330,8 +404,41 @@ class KerasNeuralFinder:
     def get_best_result(df):
         return df.sort_values(by=['loss'], ascending=True).head(10).sort_values(by='accuracy', ascending=False).head(1)
 
+    def _get_all_param_options(self, param_grid):
+        all_options = []
+        for key, values in param_grid.items():
+            key_level = []
+            for value in values:
+                key_level.append({key: value})
+            all_options.append(key_level)
+        all_options
+
+        return list(itertools.product(*all_options))
+
+    def _format_model_train_results(self, fit_results):
+
+        fit_results_combined = {}
+        for results in fit_results:
+            for keys, values in results.items():
+                if keys in fit_results_combined:
+                    fit_results_combined[keys].append(values)
+                else:
+                    fit_results_combined[keys] = [values]
+
+        return fit_results_combined
+
+    def _update_model_test_results(self, fit_results_combined, model_result, confidence_interval, std_limit):
+        for keys, values in fit_results_combined.items():
+            mean = np.mean(fit_results_combined[keys]) * 100
+            std = np.std(fit_results_combined[keys]) * 100
+            model_result['mean_' + keys] = mean
+            model_result['min_' + keys + '(' + str(confidence_interval) + '%)'] = np.round(mean - (std_limit * std), 2)
+            model_result['max_' + keys + '(' + str(confidence_interval) + '%)'] = np.round(mean + (std_limit * std), 2)
+
+        return model_result
+
     def fit(self, param_grid, silent_mode=False, store_results=False, X=None, y=None, fold=5, confidence_interval=95,
-            metrics=['accuracy']):
+            metrics=['accuracy'], reuse_weights=True, retain_weights=True):
         """
         * Creates model for every possible combination of hyper parameters defined
         * Fits the model with the training dataset
@@ -346,6 +453,8 @@ class KerasNeuralFinder:
         :param fold: Number of KFold's to be used for CrossValidation (Stratified KFold)
         :param metrics: Metrics to be estimated while fitting the model.
             Ref https://keras.io/api/metrics/#available-metrics
+        :param reuse_weights: to force the models to re-use the already created weights
+        :param retain_weights: to confirm if the user wants to store the weights for re-run again
         :return: dataframe with the choices and as well corresponding loss and accuracy
 
         Sample param_grid dict:
@@ -365,6 +474,7 @@ class KerasNeuralFinder:
         """
         overall_time_start = 0
         model_results = None
+        prev_run_weights = None
 
         try:
 
@@ -372,21 +482,15 @@ class KerasNeuralFinder:
             param_grid = self._validate_params(param_grid)
             std_limit = self._confidence_interval_std[confidence_interval]
 
+            if reuse_weights:
+                prev_run_weights_file = input("Please provide the weights file to be referred \n")
+                prev_run_weights = pd.read_json(prev_run_weights_file)
+
             # get the provided list of values for all the parameters
 
-            hidden_layer_neurons = param_grid.get(self._input_hidden_layer_neurons, self._default_hidden_layer_neurons)
-            output_layer_neurons = param_grid.get(self._input_output_layer_neurons, self._default_output_layer_neurons)
-            hidden_layer_activations = param_grid.get(self._input_hidden_layer_activations,
-                                                      self._default_hidden_layer_activation)
-            output_layer_activations = param_grid.get(self._input_output_layer_activations,
-                                                      self._default_output_layer_activation)
-            optimizers = param_grid.get(self._input_optimizers, self._default_optimizers)
-            epochs = param_grid.get(self._input_epochs, self._default_epochs)
-            learning_rates = param_grid.get(self._input_learning_rates, self._default_learning_rate)
-            loss_functions = param_grid.get(self._input_loss_functions, self._default_loss)
-            kernel_inializers = param_grid.get(self._input_kernel_inializers, self._default_kernel_initializers)
-            bias_initializers = param_grid.get(self._input_bias_initializers, self._default_bias_initializers)
+            param_options = self._get_all_param_options(param_grid)
 
+            #TODO
             total_diff_choices = self.estimate_run(param_grid)
 
             if not silent_mode:
@@ -405,106 +509,81 @@ class KerasNeuralFinder:
 
                 overall_time_start = time.time()
 
-                print(f"Starting ...2")
+                print(f"Starting ...")
 
-                for choice_hidden_layer_neurons in hidden_layer_neurons:
-                    for choice_output_layer_neurons in output_layer_neurons:
-                        for choice_hidden_layer_activations in hidden_layer_activations:
-                            for choice_output_layer_activations in output_layer_activations:
-                                for choice_optimizers in optimizers:
-                                    for choice_epochs in epochs:
-                                        for choice_learning_rates in learning_rates:
-                                            for choice_loss_functions in loss_functions:
-                                                for choice_kernel_inializers in kernel_inializers:
-                                                    for choice_bias_initializers in bias_initializers:
-                                                        # Resetting the variables for every iteration
-                                                        model = None
-                                                        model_result = {}
-                                                        start_time = time.time()
+                for options in param_options:
 
-                                                        # Creating Model, adding layers, compiling and fit
-                                                        model = self._create_model()
-                                                        model = self._add_layers(model, choice_hidden_layer_neurons, \
-                                                                                 choice_output_layer_neurons, \
-                                                                                 choice_hidden_layer_activations, \
-                                                                                 choice_output_layer_activations, \
-                                                                                 choice_kernel_inializers, \
-                                                                                 choice_bias_initializers, \
-                                                                                 X)
+                    option = {}
+                    for curr_option in options:
+                        option.update(curr_option)
 
-                                                        optimizer_instance = self._get_optimizer(choice_optimizers,
-                                                                                                 choice_learning_rates)
-                                                        model = self._compile_model(model, \
-                                                                                    optimizer_instance, \
-                                                                                    choice_loss_functions,
-                                                                                    metrics)
+                    choice_hidden_layer_neurons = option.get(self._input_hidden_layer_neurons,
+                                                              self._default_hidden_layer_neurons)
+                    choice_hidden_layer_activations = option.get(self._input_hidden_layer_activations,
+                                                                 self._default_hidden_layer_activation)
+                    choice_output_layer_neurons = option.get(self._input_output_layer_neurons,
+                                                             self._default_output_layer_neurons)
+                    choice_output_layer_activations = option.get(self._input_output_layer_activations,
+                                                                 self._default_output_layer_activation)
+                    choice_optimizers = option.get(self._input_optimizers, self._default_optimizers)
+                    choice_epochs = option.get(self._input_epochs, self._default_epochs)
+                    choice_learning_rates = option.get(self._input_learning_rates, self._default_learning_rate)
+                    choice_loss_functions = option.get(self._input_loss_functions, self._default_loss)
+                    choice_kernel_initializers = option.get(self._input_kernel_inializers,
+                                                            self._default_kernel_initializers)
+                    choice_bias_initializers = option.get(self._input_bias_initializers,
+                                                          self._default_bias_initializers)
 
-                                                        # Sets the batch size to 10% of the total size
-                                                        batch_size = math.ceil(X.shape[0] * 0.1)
+                    # Resetting the variables for every iteration
+                    model = None
+                    model_result = {}
+                    start_time = time.time()
 
-                                                        fit_results = self._stratified_crossvalidation(model,
-                                                                                                       choice_epochs,
-                                                                                                       fold,
-                                                                                                       batch_size,
-                                                                                                       X,
-                                                                                                       y,
-                                                                                                       metrics)
+                    # Creating Model, adding layers, compiling and fit
+                    model = self._create_model()
+                    model = self._add_layers(model, choice_hidden_layer_neurons, choice_output_layer_neurons,
+                                             choice_hidden_layer_activations, choice_output_layer_activations,
+                                             choice_kernel_initializers, choice_bias_initializers, X)
 
-                                                        fit_results_combined = {}
-                                                        for results in fit_results:
-                                                            for keys, values in results.items():
-                                                                if keys in fit_results_combined:
-                                                                    fit_results_combined[keys].append(values)
-                                                                else:
-                                                                    fit_results_combined[keys] = [values]
+                    option[self._input_hidden_layer_neurons] = self._convert_list_to_string(choice_hidden_layer_neurons)
+                    option[self._input_output_layer_neurons] = self._convert_list_to_string(choice_hidden_layer_neurons)
 
-                                                        for keys, values in fit_results_combined.items():
-                                                            mean = np.mean(fit_results_combined[keys]) * 100
-                                                            std = np.std(fit_results_combined[keys]) * 100
-                                                            model_result['mean_' + keys] = mean
-                                                            model_result['min_' + keys + '(' + str(
-                                                                confidence_interval) + '%)'] = np.round(
-                                                                mean - (std_limit * std), 2)
-                                                            model_result['max_' + keys + '(' + str(
-                                                                confidence_interval) + '%)'] = np.round(
-                                                                mean + (std_limit * std), 2)
+                    # Capturing the values for every iteration to be stored in a dataframe
+                    model_result = option
+                    model_result[self._choice] = choice
 
-                                                        # Evaluating model with Training data
-                                                        # model_evaluation_train_result = self._evaluate_model(model, X,y)
+                    if retain_weights:
+                        self._retain_weights(model, model_result)
 
-                                                        # Capturing the values for every iteration to be stored in a dataframe
-                                                        model_result['choice'] = choice
-                                                        model_result['Hidden Layer(# of neurons)'] = \
-                                                            self._convert_list_to_string(choice_hidden_layer_neurons)
-                                                        model_result['Hidden Layer(# of layers)'] = \
-                                                            len(choice_hidden_layer_neurons)
-                                                        model_result['Hidden Layer(Activation Fn)'] = \
-                                                            choice_hidden_layer_activations
-                                                        model_result['Output Layer(# of neurons)'] = \
-                                                            self._convert_list_to_string(choice_output_layer_neurons)
-                                                        model_result['Output Layer(Activation Fn)'] = \
-                                                            choice_output_layer_activations
-                                                        model_result[self._input_optimizers] = choice_optimizers
-                                                        model_result[self._input_learning_rates] = choice_learning_rates
-                                                        model_result[
-                                                            self._input_kernel_inializers] = choice_kernel_inializers
-                                                        model_result[
-                                                            self._input_bias_initializers] = choice_bias_initializers
-                                                        model_result[self._input_epochs] = choice_epochs
-                                                        model_result[self._input_loss_functions] = choice_loss_functions
-                                                        # print(model_evaluation_train_result)
+                    if reuse_weights:
+                        model = self._set_weights(model, prev_run_weights, model_result, choice)
 
-                                                        model_results.append(model_result)
+                    optimizer_instance = self._get_optimizer(choice_optimizers,
+                                                             choice_learning_rates)
+                    model = self._compile_model(model, optimizer_instance, choice_loss_functions, metrics)
 
-                                                        end_time = time.time()
-                                                        time_taken = round((end_time - start_time), 2)
+                    # Sets the batch size to 10% of the total size
+                    batch_size = math.ceil(X.shape[0] * 0.1)
 
-                                                        # Clearing the output for every iteration
-                                                        #IPython.display.clear_output(wait=True)
+                    fit_results = self._stratified_crossvalidation(model, choice_epochs, fold, batch_size, X, y,metrics)
 
-                                                        print(
-                                                            f"Choice {choice}/{total_diff_choices}..., epoch = {choice_epochs}")
-                                                    choice += 1
+                    fit_results_combined = self._format_model_train_results(fit_results)
+
+                    model_result = self._update_model_test_results(fit_results_combined, model_result,
+                                                                   confidence_interval, std_limit)
+
+                    model_results.append(model_result)
+
+                    end_time = time.time()
+                    time_taken = round((end_time - start_time), 2)
+
+                    # Clearing the output for every iteration
+                    #IPython.display.clear_output(wait=True)
+
+                    print(
+                        f"Choice {choice}/{total_diff_choices}..., epoch = {choice_epochs}")
+
+                    choice += 1
 
             # Aborts if the user decides to cancel the run
             else:
@@ -518,12 +597,17 @@ class KerasNeuralFinder:
             traceback.print_exc()
 
         finally:
+
+            if retain_weights:
+                weight_df = pd.DataFrame(self._model_weights)
+                self._output_df_to_json(weight_df, "model_weights", suffix=True)
+
             overall_time_end = time.time()
             overall_time_taken = round((overall_time_end - overall_time_start), 2)
             print(f"Completed running ... overall time taken = {overall_time_taken}")
             model_results_df = pd.DataFrame(model_results)
 
             if store_results:
-                self._output_df_to_csv(model_results_df)
+                self._output_df_to_csv(model_results_df, "model_results", suffix=False)
 
             return model_results_df
