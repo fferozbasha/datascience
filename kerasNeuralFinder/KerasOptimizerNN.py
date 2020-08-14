@@ -10,6 +10,7 @@ import time
 import traceback
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 import itertools
+import multiprocessing
 
 
 class KerasNeuralFinder:
@@ -36,6 +37,7 @@ class KerasNeuralFinder:
     _default_bias_initializers = 'random_normal'
 
     # Input name to be used by the users, while providig param_grid
+    _run_id = 'run_id'
     _choice = 'choice'
     _input_hidden_layer_neurons = 'hidden_layer_neurons'
     _input_output_layer_neurons = 'output_layer_neurons'
@@ -47,6 +49,7 @@ class KerasNeuralFinder:
     _input_loss_functions = 'loss_functions'
     _input_kernel_inializers = 'kernel_inializers'
     _input_bias_initializers = 'bias_initializers'
+
 
     def _create_model(self):
         """
@@ -76,11 +79,12 @@ class KerasNeuralFinder:
         i = 0
 
         for layer in range(0, number_of_hidden_layers):
-            model.add(Dense(hidden_layer_neurons[i], input_shape=(X.shape[1], ),
+            model.add(Dense(hidden_layer_neurons[i], input_shape=(X.shape[1],),
                             activation=activation_fn_hidden_layer, kernel_initializer=kernel_inializers,
                             bias_initializer=bias_initializers, name='hidden_layer_' + str(i)))
             i += 1
-        model.add(Dense(output_layer_neurons, input_shape=(X.shape[1],), activation=activation_fn_output_layer, name='output_layer'))
+        model.add(Dense(output_layer_neurons, input_shape=(X.shape[1],), activation=activation_fn_output_layer,
+                        name='output_layer'))
 
         return model
 
@@ -147,12 +151,8 @@ class KerasNeuralFinder:
 
     def _stratified_crossvalidation(self, model, epoch, fold, batch_size, x, y, metrics):
 
-        #training_accuarcy_score = []
-        #validation_accuarcy_score = []
-        #training_loss_score = []
-        #validation_loss_score = []
         results = []
-        skf = StratifiedKFold(n_splits=fold, shuffle=False)
+        skf = StratifiedKFold(n_splits=fold, shuffle=True, random_state=5)
 
         for train_indices, val_indices in skf.split(x, y):
             iter_result = {}
@@ -164,14 +164,9 @@ class KerasNeuralFinder:
             for metric, values in history.history.items():
                 iter_result[metric] = values[-1]
 
-            #training_accuarcy_score.append(accuracy_history[-1])
-            #validation_accuarcy_score.append(val_accuracy_history[-1])
-            #training_loss_score.append(loss_history[-1])
-            #validation_loss_score.append(val_loss_history[-1])
             results.append(iter_result)
 
         return results
-
 
     def _compile_model(self, model, optimizer_instance, loss, metrics):
         """
@@ -193,16 +188,16 @@ class KerasNeuralFinder:
         for layer in model.layers:
             weights = layer.get_weights()
             model_info[layer.name] = weights
-        self._model_weights.append(model_info)
 
-    def _set_weights(self, model, prev_weights, model_info, choice):
+        # self._model_weights.append(model_info)
+
+    def _set_weights(self, model, prev_weights, model_info):
 
         if prev_weights.empty:
             print("Invalid file provided for the historical weights.")
-            return
+            return model
 
-        layer_info = {self._choice: model_info[self._choice],
-                      self._input_hidden_layer_neurons: model_info[self._input_hidden_layer_neurons],
+        layer_info = {self._input_hidden_layer_neurons: model_info[self._input_hidden_layer_neurons],
                       self._input_hidden_layer_activations: model_info[self._input_hidden_layer_activations],
                       self._input_output_layer_activations: model_info[self._input_output_layer_activations],
                       self._input_optimizers: model_info[self._input_optimizers],
@@ -212,7 +207,6 @@ class KerasNeuralFinder:
                       self._input_epochs: model_info[self._input_epochs],
                       self._input_loss_functions: model_info[self._input_loss_functions]}
 
-        filtered = pd.DataFrame()
         idx = 0
         if not prev_weights.empty:
             for keys in layer_info.keys():
@@ -221,22 +215,25 @@ class KerasNeuralFinder:
                     if idx == 0:
                         filtered = prev_weights[prev_weights[keys] == value]
                     elif filtered.empty:
-                        print(f"No previous weights found for {choice}")
+                        print(f"No matching previous weights found")
                         return model
                     else:
                         filtered = filtered[filtered[keys] == value]
+                        if filtered.empty:
+                            print(f"No matching previous weights found")
+                            return model
                 idx += 1
 
         if not filtered.empty:
             for layer in model.layers:
-                earlier_layer_weights = filtered.get(layer.name, None)
-                if not earlier_layer_weights.empty:
-                    wts = np.asarray(earlier_layer_weights[choice-1])
-                    _all_weights_list = []
-                    for wt in wts:
-                        _individual_wts_array = np.array(wt)
-                        _all_weights_list.append(_individual_wts_array)
-                    layer.set_weights(_all_weights_list)
+                layer_weights = filtered.get(layer.name, None)
+                if not layer_weights.empty:
+                    layer_weights_list = []
+                    for weights in layer_weights:
+                        for weight in weights:
+                            weight_array = np.array(weight)
+                            layer_weights_list.append(weight_array)
+                        layer.set_weights(layer_weights_list)
 
             return model
 
@@ -307,7 +304,7 @@ class KerasNeuralFinder:
         """
         curr_date_time = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         if suffix:
-           filename = name_prefix + "_" + curr_date_time + ".csv"
+            filename = name_prefix + "_" + curr_date_time + ".csv"
         else:
             filename = name_prefix + ".csv"
         df.to_csv(filename)
@@ -319,8 +316,7 @@ class KerasNeuralFinder:
             filename = name_prefix + "_" + curr_date_time + ".json"
         else:
             filename = name_prefix + ".json"
-        file = open(filename, 'w+')
-        df.to_json(file)
+        df.to_json(filename)
         print(f"Weights stored in file {filename}")
 
     @staticmethod
@@ -336,9 +332,7 @@ class KerasNeuralFinder:
 
         approx_time_taken = total_diff_choices * 1.5
 
-        print(f"There are around {total_diff_choices} choices based on the list of parameters defined")
-        print(f"And it might take approximately {approx_time_taken} seconds assuming it would take 1.5 seconds for "
-              f"every epoch")
+        print(f"Total number of different choices = {total_diff_choices}")
         return total_diff_choices
 
     def _validate_params(self, param_grid):
@@ -361,7 +355,7 @@ class KerasNeuralFinder:
         print("""
         Create a dictionary as below with the choice of options for each parameter
         =========================================================================
-        
+
         version 2
 
         param_grid = {}
@@ -378,8 +372,8 @@ class KerasNeuralFinder:
 
         Note:
         ====
-        hidden_layer_neurons: Ex- [[11, 8, 5], [8, 6]] means there are 2 possible options for 
-        hidden layer configuration. 
+        hidden_layer_neurons: Ex- [[11, 8, 5], [8, 6]] means there are 2 possible options for
+        hidden layer configuration.
         1st = 3 layers with 11,8 and 5 neurons in each layer
         2nd = 2 layers with 8 and 6 neurons in each layer
 
@@ -387,7 +381,7 @@ class KerasNeuralFinder:
         dict as {1:(8, 13), 2:(5, 13), 3:(5, 8), 4:(5,6)}
         Key = refers to the layer number
         Value = range of number of neurons that can be configured in that layer
-        Ex: 
+        Ex:
         1 = refers to the 1st layer
         (8, 13) = means that the 1st layer can have from 8 to 13 neurons
         2 = refers to the 2nd layer
@@ -401,8 +395,23 @@ class KerasNeuralFinder:
         """)
 
     @staticmethod
-    def get_best_result(df):
-        return df.sort_values(by=['loss'], ascending=True).head(10).sort_values(by='accuracy', ascending=False).head(1)
+    def get_best_result(data=None, by={'accuracy': 'high'}, count=1):
+
+        if isinstance(by, str):
+            by = {by: 'high'}
+
+        if isinstance(by, dict):
+            temp = pd.DataFrame()
+            for by_variable in by.keys():
+                if temp.empty:
+                    temp = data
+                ascending = True if by[by_variable] == 'low' else False
+                temp = temp.sort_values(by=by_variable, ascending=ascending)
+        else:
+            print(f"Invalid format provided for {by}")
+            return None
+
+        return temp.head(count)
 
     def _get_all_param_options(self, param_grid):
         all_options = []
@@ -431,7 +440,7 @@ class KerasNeuralFinder:
         for keys, values in fit_results_combined.items():
             mean = np.mean(fit_results_combined[keys]) * 100
             std = np.std(fit_results_combined[keys]) * 100
-            model_result['mean_' + keys] = mean
+            model_result[keys] = mean
             model_result['min_' + keys + '(' + str(confidence_interval) + '%)'] = np.round(mean - (std_limit * std), 2)
             model_result['max_' + keys + '(' + str(confidence_interval) + '%)'] = np.round(mean + (std_limit * std), 2)
 
@@ -478,19 +487,26 @@ class KerasNeuralFinder:
 
         try:
 
+            _run_id = str(time.time()).replace('.', '')
+
             should_run = False
             param_grid = self._validate_params(param_grid)
             std_limit = self._confidence_interval_std[confidence_interval]
 
             if reuse_weights:
-                prev_run_weights_file = input("Please provide the weights file to be referred \n")
-                prev_run_weights = pd.read_json(prev_run_weights_file)
+                try:
+                    df = pd.read_json("model_results.json")
+                    _prev_run_id = df[self._run_id].max()
+                    prev_run_weights = df[df[self._run_id] == _prev_run_id]
+                except Exception as e:
+                    reuse_weights = False
+                    print(f"Unable to load the earlier results {str(e)}, will be using new weights for the model")
 
             # get the provided list of values for all the parameters
 
             param_options = self._get_all_param_options(param_grid)
 
-            #TODO
+            # TODO
             total_diff_choices = self.estimate_run(param_grid)
 
             if not silent_mode:
@@ -518,7 +534,7 @@ class KerasNeuralFinder:
                         option.update(curr_option)
 
                     choice_hidden_layer_neurons = option.get(self._input_hidden_layer_neurons,
-                                                              self._default_hidden_layer_neurons)
+                                                             self._default_hidden_layer_neurons)
                     choice_hidden_layer_activations = option.get(self._input_hidden_layer_activations,
                                                                  self._default_hidden_layer_activation)
                     choice_output_layer_neurons = option.get(self._input_output_layer_neurons,
@@ -546,17 +562,18 @@ class KerasNeuralFinder:
                                              choice_kernel_initializers, choice_bias_initializers, X)
 
                     option[self._input_hidden_layer_neurons] = self._convert_list_to_string(choice_hidden_layer_neurons)
-                    option[self._input_output_layer_neurons] = self._convert_list_to_string(choice_hidden_layer_neurons)
+                    option[self._input_output_layer_neurons] = self._convert_list_to_string(choice_output_layer_neurons)
 
                     # Capturing the values for every iteration to be stored in a dataframe
                     model_result = option
                     model_result[self._choice] = choice
+                    model_result[self._run_id] = _run_id
 
-                    if retain_weights:
-                        self._retain_weights(model, model_result)
+                    #if retain_weights:
+                        #self._retain_weights(model, model_result)
 
                     if reuse_weights:
-                        model = self._set_weights(model, prev_run_weights, model_result, choice)
+                        model = self._set_weights(model, prev_run_weights, model_result)
 
                     optimizer_instance = self._get_optimizer(choice_optimizers,
                                                              choice_learning_rates)
@@ -565,9 +582,12 @@ class KerasNeuralFinder:
                     # Sets the batch size to 10% of the total size
                     batch_size = math.ceil(X.shape[0] * 0.1)
 
-                    fit_results = self._stratified_crossvalidation(model, choice_epochs, fold, batch_size, X, y,metrics)
+                    fit_results = self._stratified_crossvalidation(model, choice_epochs, fold, batch_size, X, y,
+                                                                   metrics)
 
                     fit_results_combined = self._format_model_train_results(fit_results)
+
+                    self._retain_weights(model, model_result)
 
                     model_result = self._update_model_test_results(fit_results_combined, model_result,
                                                                    confidence_interval, std_limit)
@@ -578,7 +598,7 @@ class KerasNeuralFinder:
                     time_taken = round((end_time - start_time), 2)
 
                     # Clearing the output for every iteration
-                    #IPython.display.clear_output(wait=True)
+                    # IPython.display.clear_output(wait=True)
 
                     print(
                         f"Choice {choice}/{total_diff_choices}..., epoch = {choice_epochs}")
@@ -598,16 +618,12 @@ class KerasNeuralFinder:
 
         finally:
 
-            if retain_weights:
-                weight_df = pd.DataFrame(self._model_weights)
-                self._output_df_to_json(weight_df, "model_weights", suffix=True)
-
             overall_time_end = time.time()
             overall_time_taken = round((overall_time_end - overall_time_start), 2)
             print(f"Completed running ... overall time taken = {overall_time_taken}")
             model_results_df = pd.DataFrame(model_results)
 
             if store_results:
-                self._output_df_to_csv(model_results_df, "model_results", suffix=False)
+                self._output_df_to_json(model_results_df, "model_results", suffix=False)
 
             return model_results_df
