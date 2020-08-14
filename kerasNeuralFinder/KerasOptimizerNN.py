@@ -152,7 +152,7 @@ class KerasNeuralFinder:
     def _stratified_crossvalidation(self, model, epoch, fold, batch_size, x, y, metrics):
 
         results = []
-        skf = StratifiedKFold(n_splits=fold, shuffle=True, random_state=5)
+        skf = StratifiedKFold(n_splits=fold, shuffle=False)
 
         for train_indices, val_indices in skf.split(x, y):
             iter_result = {}
@@ -189,6 +189,7 @@ class KerasNeuralFinder:
             weights = layer.get_weights()
             model_info[layer.name] = weights
 
+        return model_info
         # self._model_weights.append(model_info)
 
     def _set_weights(self, model, prev_weights, model_info):
@@ -226,12 +227,13 @@ class KerasNeuralFinder:
 
         if not filtered.empty:
             for layer in model.layers:
+                model_weights = []
                 layer_weights = filtered.get(layer.name, None)
                 if not layer_weights.empty:
                     layer_weights_list = []
                     for weights in layer_weights:
                         for weight in weights:
-                            weight_array = np.array(weight)
+                            weight_array = np.asarray(weight)
                             layer_weights_list.append(weight_array)
                         layer.set_weights(layer_weights_list)
 
@@ -317,7 +319,6 @@ class KerasNeuralFinder:
         else:
             filename = name_prefix + ".json"
         df.to_json(filename)
-        print(f"Weights stored in file {filename}")
 
     @staticmethod
     def estimate_run(param_grid):
@@ -394,8 +395,7 @@ class KerasNeuralFinder:
         The returned results dataframe will have the list of all executions, from which you can choose the best option
         """)
 
-    @staticmethod
-    def get_best_result(data=None, by={'accuracy': 'high'}, count=1):
+    def get_best_result(self, data=None, by={'accuracy': 'high'}, count=1):
 
         if isinstance(by, str):
             by = {by: 'high'}
@@ -487,8 +487,7 @@ class KerasNeuralFinder:
 
         try:
 
-            _run_id = str(time.time()).replace('.', '')
-
+            _run_id =time.time()
             should_run = False
             param_grid = self._validate_params(param_grid)
             std_limit = self._confidence_interval_std[confidence_interval]
@@ -569,12 +568,6 @@ class KerasNeuralFinder:
                     model_result[self._choice] = choice
                     model_result[self._run_id] = _run_id
 
-                    #if retain_weights:
-                        #self._retain_weights(model, model_result)
-
-                    if reuse_weights:
-                        model = self._set_weights(model, prev_run_weights, model_result)
-
                     optimizer_instance = self._get_optimizer(choice_optimizers,
                                                              choice_learning_rates)
                     model = self._compile_model(model, optimizer_instance, choice_loss_functions, metrics)
@@ -582,26 +575,36 @@ class KerasNeuralFinder:
                     # Sets the batch size to 10% of the total size
                     batch_size = math.ceil(X.shape[0] * 0.1)
 
+                    #if reuse_weights:
+                        #model = self._set_weights(model, prev_run_weights, model_result)
+
                     fit_results = self._stratified_crossvalidation(model, choice_epochs, fold, batch_size, X, y,
                                                                    metrics)
 
                     fit_results_combined = self._format_model_train_results(fit_results)
 
-                    self._retain_weights(model, model_result)
-
                     model_result = self._update_model_test_results(fit_results_combined, model_result,
                                                                    confidence_interval, std_limit)
 
+                    loss = model_result['loss']
+                    accuracy = model_result['accuracy']
+
+                    #model_result = self._retain_weights(model, model_result)
                     model_results.append(model_result)
 
                     end_time = time.time()
                     time_taken = round((end_time - start_time), 2)
 
                     # Clearing the output for every iteration
-                    # IPython.display.clear_output(wait=True)
+                    IPython.display.clear_output(wait=True)
 
                     print(
-                        f"Choice {choice}/{total_diff_choices}..., epoch = {choice_epochs}")
+                        f"Choice {choice}/{total_diff_choices}..., epoch = {choice_epochs}, "
+                        f"time_taken={time_taken} seconds, loss={loss}, accuracy={accuracy}")
+
+                    print("Parameters are :\n")
+                    for curr_option in options:
+                        print(f"{curr_option}")
 
                     choice += 1
 
@@ -620,7 +623,7 @@ class KerasNeuralFinder:
 
             overall_time_end = time.time()
             overall_time_taken = round((overall_time_end - overall_time_start), 2)
-            print(f"Completed running ... overall time taken = {overall_time_taken}")
+            print(f"\nCompleted running ... overall time taken = {overall_time_taken}")
             model_results_df = pd.DataFrame(model_results)
 
             if store_results:
